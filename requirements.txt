@@ -1,0 +1,7 @@
+flask
+flask-cors
+python-dotenv
+waitress
+email-validator
+tzdata
+qrcode[pil]
