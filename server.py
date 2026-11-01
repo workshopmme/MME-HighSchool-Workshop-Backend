@@ -1,5 +1,6 @@
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -43,10 +44,14 @@ def init():
         connection.execute('''CREATE TABLE IF NOT EXISTS teams(
             id INTEGER PRIMARY KEY,
             school_name TEXT NOT NULL,
+            team_name TEXT NOT NULL DEFAULT '',
             interested_major TEXT NOT NULL,
             entered INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )''')
+        team_columns = {column[1] for column in connection.execute('PRAGMA table_info(teams)')}
+        if 'team_name' not in team_columns:
+            connection.execute("ALTER TABLE teams ADD COLUMN team_name TEXT NOT NULL DEFAULT ''")
         connection.execute('''CREATE TABLE IF NOT EXISTS team_members(
             id INTEGER PRIMARY KEY,
             team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
@@ -118,6 +123,11 @@ def valid_email(email):
         return True
     except EmailNotValidError:
         return False
+
+
+def valid_phone(phone):
+    digits = re.sub(r'\D', '', phone)
+    return bool(re.fullmatch(r'[0-9+() -]+', phone)) and 7 <= len(digits) <= 15
 
 
 def get_deadline():
@@ -192,6 +202,7 @@ def register_team():
         return jsonify(error='Registration is closed.'), 403
     data = body()
     school_name = text_field(data, 'schoolName', 120)
+    team_name = text_field(data, 'teamName', 120, optional=True)
     interested_major = text_field(data, 'interestedMajor', 120)
     members = data.get('members')
     if not isinstance(members, list) or not 1 <= len(members) <= 3:
@@ -205,12 +216,14 @@ def register_team():
         phone = text_field(member, 'phone', 40)
         if not valid_email(email):
             raise BadRequest(f'Enter a valid email for student {index}.')
+        if not valid_phone(phone):
+            raise BadRequest(f'Enter a valid phone number for student {index}.')
         cleaned.append((name, email, phone))
     with db() as connection:
         connection.execute('BEGIN IMMEDIATE')
         team_id = connection.execute(
-            'INSERT INTO teams(school_name,interested_major) VALUES(?,?)',
-            (school_name, interested_major),
+            'INSERT INTO teams(school_name,team_name,interested_major) VALUES(?,?,?)',
+            (school_name, team_name, interested_major),
         ).lastrowid
         connection.executemany(
             'INSERT INTO team_members(team_id,name,email,phone) VALUES(?,?,?,?)',
@@ -231,7 +244,9 @@ def stats():
     result = one('''SELECT
         COUNT(*) AS totalTeams,
         COALESCE(SUM(entered), 0) AS enteredTeams,
-        COUNT(DISTINCT LOWER(TRIM(school_name))) AS totalSchools
+        COUNT(DISTINCT LOWER(TRIM(school_name))) AS totalSchools,
+        COALESCE(SUM(CASE WHEN LOWER(interested_major)='mechatronics engineering' THEN 1 ELSE 0 END), 0) AS mechatronicsTeams,
+        COALESCE(SUM(CASE WHEN LOWER(interested_major)='mechanical engineering' THEN 1 ELSE 0 END), 0) AS mechanicalTeams
         FROM teams''')
     result['totalStudents'] = one('SELECT COUNT(*) AS count FROM team_members')['count']
     result['enteredStudents'] = one('''SELECT COUNT(*) AS count FROM team_members AS member
@@ -255,10 +270,10 @@ def teams():
         raise BadRequest('Invalid check-in filter.')
     where, args = ['1=1'], []
     if query:
-        where.append('''(team.school_name LIKE ? OR team.interested_major LIKE ? OR EXISTS(
+        where.append('''(team.school_name LIKE ? OR team.team_name LIKE ? OR team.interested_major LIKE ? OR EXISTS(
             SELECT 1 FROM team_members member WHERE member.team_id=team.id
             AND (member.name LIKE ? OR member.email LIKE ? OR member.phone LIKE ?)))''')
-        args.extend(['%' + query + '%'] * 5)
+        args.extend(['%' + query + '%'] * 6)
     if entered:
         where.append('team.entered=?')
         args.append(int(entered))
